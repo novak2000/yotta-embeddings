@@ -6,7 +6,7 @@ B.S. thesis project, Text embedding model for semantic search.
 
 Model is based on [MiniLM-L12-H384-uncased](https://huggingface.co/microsoft/MiniLM-L12-H384-uncased) and can be found on [huggingface](https://huggingface.co/djovak/yotta-embeddings).
 
-Idea of the project was to replicate results of opensource SOTA models of same size with limited resources. Training was done on 4xV100 GPU server(sponsored by [yottaanswers.com](http://yottaanswers.com)).
+Idea of the project was to replicate results of opensource SOTA models of the same size with limited resources. Training was done on 4xV100 GPU server(sponsored by [yottaanswers.com](http://yottaanswers.com)).
 
 To enable big enough batch size for contrastive learning, few techniques were used:
 - casting model to fp16
@@ -26,7 +26,7 @@ All used datasets can be found on [this page](https://huggingface.co/datasets/se
 ## results
 
 Last column reprezents result of our model. nDCG@10 metric was used.
-Results of BM25, `E5-small` and `GTE-small` were taken from [GTE paper](https://arxiv.org/pdf/2308.03281.pdf).
+Results of `BM25`, `E5-small` and `GTE-small` were taken from [GTE paper](https://arxiv.org/pdf/2308.03281.pdf).
 
 ![yotta embeddings results on few datasets from BEIR benchmark](results.png)
 
@@ -38,7 +38,7 @@ TODO
 
 ### run training
 
-training can be run by 'run_torch_distributed.sh'
+training can be run by `run_torch_distributed.sh`
 
 TODO
 

@@ -28,7 +28,7 @@ All used datasets can be found on [this page](https://huggingface.co/datasets/se
 Last column reprezents result of our model. nDCG@10 metric was used.
 Results of `BM25`, `E5-small` and `GTE-small` were taken from [GTE paper](https://arxiv.org/pdf/2308.03281.pdf).
 
-![yotta embeddings results on few datasets from BEIR benchmark](results.png)
+![yotta embeddings results on datasets from BEIR benchmark](results_extended.png)
 
 TODO upload whole BEIR benchmark table
 
@@ -39,6 +39,8 @@ TODO
 ### run training
 
 training can be run by `run_torch_distributed.sh`
+
+sencond stage, finetuning can be run by `run_torch_distributed_finetune.sh`
 
 TODO
 

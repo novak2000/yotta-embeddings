@@ -1,8 +1,10 @@
 import os
+from networkx import normalized_cut_size
 from torch import nn, Tensor
 import torch
 import logging
 
+from typing import List, Dict
 from typing import Optional
 from sentence_transformers import InputExample
 from transformers import DataCollator, DataCollatorForWholeWordMask, DataCollatorWithPadding
@@ -38,8 +40,35 @@ class YottaDatasetForTraining(torch.utils.data.Dataset):
 
     def __len__(self):
         return self.total_len
+    
+class YottaDatasetForFinetuning(torch.utils.data.Dataset):
+    
+    def _load_data(self, path):
+        return datasets.load_dataset('json', data_files= path, split='train')
+    
+    def __init__(self, dataset_paths : List[str]):
+        self.dataset_paths = dataset_paths
+        datasets_data = []
+        for dataset in dataset_paths:
+            tmp_data = self._load_data(dataset)
+            datasets_data.append(tmp_data)
+            print(dataset)
+            
+        self.data = datasets.concatenate_datasets(datasets_data)
+        print('duzina svega: ', len(self.data))
+        self.total_len = len(self.data)
+    
+    
+    def __getitem__(self, item):
+        query = self.data[item]['query']
+        pos = self.data[item]['pos']
+        neg = self.data[item]['neg']
+        return InputExample(texts=[query, pos, neg])
 
+    def __len__(self):
+        return self.total_len
 
+# depricated
 class YottaCollator(DataCollatorForWholeWordMask):
     
     def __call__(self, examples):
@@ -95,6 +124,46 @@ class EmbedCollator(DataCollatorWithPadding):
             return_tensors="pt",
         )
         return {"query": q_collated, "passage": d_collated}
+
+@dataclass
+class FinetuneCollator(DataCollatorWithPadding):
+    """
+    Wrapper that does conversion from List[Tuple[encode_qry, encode_psg]] to List[qry], List[psg]
+    and pass batch separately to the actual collator.
+    Abstract out data detail for the model.
+    """
+    
+    query_max_len: int = 128
+    passage_max_len: int = 512
+    neg_passage_max_len: int = 512
+
+    def __call__(self, examples):
+        query = [f.texts[0] for f in examples]
+        passage = [f.texts[1] for f in examples]
+        neg = [f.texts[2] for f in examples]
+
+        q_collated = self.tokenizer(
+            query,
+            padding=True,
+            truncation=True,
+            max_length=self.query_max_len,
+            return_tensors="pt",
+        )
+        d_collated = self.tokenizer(
+            passage,
+            padding=True,
+            truncation=True,
+            max_length=self.passage_max_len,
+            return_tensors="pt",
+        )
+        neg_collated = self.tokenizer(
+            neg,
+            padding=True,
+            truncation=True,
+            max_length=self.passage_max_len,
+            return_tensors="pt",
+        )
+        return {"query": q_collated, "passage": d_collated, 'neg': neg_collated}
 
 from sentence_transformers import SentenceTransformer
 import sentence_transformers.models as models
@@ -228,16 +297,85 @@ class YottaEmbedder(nn.Module):
             scores_p = self.compute_similarity(p_reps, p_reps)
             scores_p[torch.eye(scores_q.shape[0], dtype=torch.bool)] = 0.0
             
-            scores_1 = torch.cat((scores, scores_q), dim=1)
-            scores_2 = torch.cat((scores_p, scores.transpose(0,1)), dim=1)
-            scores = torch.cat((scores_1, scores_2), dim=0)
+            scores = torch.cat((scores, scores_q, scores_p, scores.transpose(0,1)), dim=1)
+            
+            # scores_1 = torch.cat((scores, scores_q), dim=1)
+            # scores_2 = torch.cat((scores_p, scores.transpose(0,1)), dim=1)
+            # scores = torch.cat((scores_1, scores_2), dim=0)
             scores = scores / self.temperature
             
             # TODO enable triplet loss
             # scores = scores.view(q_reps.size(0)*2, -1)
 
             target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
+            # target = torch.cat((target, torch.zeros((scores.shape[0],scores.shape[1]-target.shape[1]), dtype=torch.long)), dim=0)
             # target = target * (p_reps.size(0) // q_reps.size(0))
+
+            ## logging
+            max_ids = torch.max(scores, 1)[1]
+            logger.info(torch.sum(max_ids != target))
+             
+            loss = self.compute_loss(scores, target)
+
+        else:
+            scores = self.compute_similarity(q_reps, p_reps)
+            loss = None
+        return EncoderOutput(
+            loss=loss,
+            scores=scores,
+            q_reps=q_reps,
+            p_reps=p_reps,
+        )
+
+    def compute_loss(self, scores, target):
+        return self.cross_entropy(scores, target)
+
+    def _dist_gather_tensor(self, t: Optional[torch.Tensor]):
+        if t is None:
+            return None
+        t = t.contiguous()
+
+        all_tensors = [torch.empty_like(t) for _ in range(self.world_size)]
+        dist.all_gather(all_tensors, t)
+
+        all_tensors[self.process_rank] = t
+        all_tensors = torch.cat(all_tensors, dim=0)
+
+        return all_tensors
+
+    def save(self, output_dir: str):
+        state_dict = self.model.state_dict()
+        state_dict = type(state_dict)(
+            {k: v.clone().cpu()
+             for k,
+                 v in state_dict.items()})
+        self.model.save_pretrained(output_dir, state_dict=state_dict)
+
+class YottaFinetuneEmbedder(YottaEmbedder):
+
+    def forward(self, query: Dict[str, Tensor] = None, passage: Dict[str, Tensor] = None, neg: Dict[str, Tensor] = None):
+        q_reps = self.encode(query)
+        p_reps = self.encode(passage)
+        neg_reps = self.encode(neg)
+
+        if self.training:
+            if self.negatives_cross_device:
+                q_reps = self._dist_gather_tensor(q_reps)
+                p_reps = self._dist_gather_tensor(p_reps)
+                neg_reps = self._dist_gather_tensor(neg_reps)
+
+            
+            scores = self.compute_similarity(q_reps, p_reps)
+            scores_neg = self.compute_similarity(q_reps, neg_reps)
+            scores_q = self.compute_similarity(q_reps, q_reps)
+            scores_q[torch.eye(scores_q.shape[0], dtype=torch.bool)] = 0.0
+            scores_p = self.compute_similarity(p_reps, p_reps)
+            scores_p[torch.eye(scores_q.shape[0], dtype=torch.bool)] = 0.0
+            
+            scores = torch.cat((scores, scores_q, scores_p, scores.transpose(0,1), scores_neg), dim=1)
+            scores = scores / self.temperature
+
+            target = torch.arange(scores.size(0), device=scores.device, dtype=torch.long)
 
             ## logging
             max_ids = torch.max(scores, 1)[1]
